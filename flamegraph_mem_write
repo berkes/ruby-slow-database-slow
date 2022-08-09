@@ -1,0 +1,6 @@
+Thread:1160;Fiber:1180;[global]#[no method] (1) 0.089884
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#insert (1) 0.008821
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#insert (1);Integer#times (1) 1.875162
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#insert (1);Integer#times (1);Integer#to_s (1000) 0.424862
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#insert (1);Integer#times (1);<Class::DateTime>#now (1000) 3.037691
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#insert (1);Integer#times (1);ArrayDatabase#insert (1000) 1.323462

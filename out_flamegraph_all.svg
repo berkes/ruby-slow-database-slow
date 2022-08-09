@@ -1,0 +1,1709 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="542" onload="init(evt)" viewBox="0 0 1200 542" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				clearzoom();
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="542.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="subtitle" x="600.00" y="48" >flamegraph_all</text>
+<text id="details" x="10.00" y="525" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="525" > </text>
+<g id="frames">
+<g >
+<title>DateTime#sec_fraction (1000) (2 samples, 0.08%)</title><rect x="225.9" y="125" width="1.1" height="15.0" fill="rgb(231,146,10)" rx="2" ry="2" />
+<text  x="228.87" y="135.5" ></text>
+</g>
+<g >
+<title>Kernel#freeze (2000) (1 samples, 0.04%)</title><rect x="82.0" y="301" width="0.6" height="15.0" fill="rgb(208,55,42)" rx="2" ry="2" />
+<text  x="84.98" y="311.5" ></text>
+</g>
+<g >
+<title>Array#first (1000) (1 samples, 0.04%)</title><rect x="1115.4" y="365" width="0.3" height="15.0" fill="rgb(242,23,52)" rx="2" ry="2" />
+<text  x="1118.36" y="375.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#freeze (1000) (4 samples, 0.17%)</title><rect x="80.8" y="317" width="1.8" height="15.0" fill="rgb(221,43,51)" rx="2" ry="2" />
+<text  x="83.82" y="327.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (12 samples, 0.50%)</title><rect x="266.7" y="125" width="5.8" height="15.0" fill="rgb(246,93,7)" rx="2" ry="2" />
+<text  x="269.72" y="135.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (15 samples, 0.63%)</title><rect x="1102.1" y="237" width="7.6" height="15.0" fill="rgb(232,35,26)" rx="2" ry="2" />
+<text  x="1105.10" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#supports_timestamp_timezones? (1000) (1 samples, 0.04%)</title><rect x="242.4" y="125" width="0.5" height="15.0" fill="rgb(205,132,1)" rx="2" ry="2" />
+<text  x="245.40" y="135.5" ></text>
+</g>
+<g >
+<title>Kernel#hash (1000) (1 samples, 0.04%)</title><rect x="261.1" y="77" width="0.4" height="15.0" fill="rgb(248,124,53)" rx="2" ry="2" />
+<text  x="264.06" y="87.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#assign_connection (1000) (15 samples, 0.63%)</title><rect x="255.7" y="125" width="7.3" height="15.0" fill="rgb(211,143,33)" rx="2" ry="2" />
+<text  x="258.72" y="135.5" ></text>
+</g>
+<g >
+<title>PG::Result#getvalue (4000) (3 samples, 0.13%)</title><rect x="1188.6" y="221" width="1.2" height="15.0" fill="rgb(205,162,38)" rx="2" ry="2" />
+<text  x="1191.59" y="231.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#supports_timestamp_usecs? (1000) (1 samples, 0.04%)</title><rect x="241.9" y="109" width="0.5" height="15.0" fill="rgb(222,1,34)" rx="2" ry="2" />
+<text  x="244.87" y="119.5" ></text>
+</g>
+<g >
+<title>Module#=== (11000) (6 samples, 0.25%)</title><rect x="170.0" y="269" width="2.9" height="15.0" fill="rgb(218,223,18)" rx="2" ry="2" />
+<text  x="172.97" y="279.5" ></text>
+</g>
+<g >
+<title>PG::Result#ntuples (1000) (1 samples, 0.04%)</title><rect x="1088.8" y="189" width="0.5" height="15.0" fill="rgb(241,96,42)" rx="2" ry="2" />
+<text  x="1091.84" y="199.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#insert_values_sql (1000) (232 samples, 9.69%)</title><rect x="162.5" y="301" width="114.2" height="15.0" fill="rgb(250,148,30)" rx="2" ry="2" />
+<text  x="165.49" y="311.5" >Sequel::Datase..</text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#server_version (1000) (3 samples, 0.13%)</title><rect x="276.7" y="317" width="1.7" height="15.0" fill="rgb(232,185,6)" rx="2" ry="2" />
+<text  x="279.69" y="327.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (2 samples, 0.08%)</title><rect x="79.8" y="253" width="1.0" height="15.0" fill="rgb(221,166,20)" rx="2" ry="2" />
+<text  x="82.84" y="263.5" ></text>
+</g>
+<g >
+<title>Hash#delete (1000) (2 samples, 0.08%)</title><rect x="270.2" y="93" width="1.1" height="15.0" fill="rgb(231,41,50)" rx="2" ry="2" />
+<text  x="273.25" y="103.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#uses_returning? (1000) (4 samples, 0.17%)</title><rect x="1109.7" y="349" width="1.9" height="15.0" fill="rgb(219,77,28)" rx="2" ry="2" />
+<text  x="1112.72" y="359.5" ></text>
+</g>
+<g >
+<title>Module#=== (1000) (1 samples, 0.04%)</title><rect x="155.9" y="269" width="0.3" height="15.0" fill="rgb(251,207,23)" rx="2" ry="2" />
+<text  x="158.88" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_datetime (1000) (89 samples, 3.72%)</title><rect x="198.9" y="173" width="44.0" height="15.0" fill="rgb(251,55,0)" rx="2" ry="2" />
+<text  x="201.88" y="183.5" >Sequ..</text>
+</g>
+<g >
+<title>Sequel::Dataset#insert_returning_sql (1000) (45 samples, 1.88%)</title><rect x="119.2" y="317" width="22.3" height="15.0" fill="rgb(252,206,50)" rx="2" ry="2" />
+<text  x="122.24" y="327.5" >S..</text>
+</g>
+<g >
+<title>Sequel::Dataset#select_with_sql (1000) (8 samples, 0.33%)</title><rect x="141.5" y="317" width="4.0" height="15.0" fill="rgb(218,228,3)" rx="2" ry="2" />
+<text  x="144.49" y="327.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#insert_columns_sql (1000) (59 samples, 2.46%)</title><rect x="89.3" y="317" width="29.0" height="15.0" fill="rgb(215,36,47)" rx="2" ry="2" />
+<text  x="92.33" y="327.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#check_disconnect_errors (1) (1 samples, 0.04%)</title><rect x="1149.5" y="189" width="0.4" height="15.0" fill="rgb(205,229,28)" rx="2" ry="2" />
+<text  x="1152.47" y="199.5" ></text>
+</g>
+<g >
+<title>Module#=== (1000) (1 samples, 0.04%)</title><rect x="164.9" y="285" width="0.3" height="15.0" fill="rgb(252,49,22)" rx="2" ry="2" />
+<text  x="167.91" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#synchronize (1000) (5 samples, 0.21%)</title><rect x="1147.1" y="253" width="2.3" height="15.0" fill="rgb(225,201,40)" rx="2" ry="2" />
+<text  x="1150.11" y="263.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#synchronize (1000) (8 samples, 0.33%)</title><rect x="1072.8" y="157" width="3.7" height="15.0" fill="rgb(217,8,28)" rx="2" ry="2" />
+<text  x="1075.76" y="167.5" ></text>
+</g>
+<g >
+<title>String#initialize (1000) (1 samples, 0.04%)</title><rect x="147.1" y="285" width="0.3" height="15.0" fill="rgb(223,90,23)" rx="2" ry="2" />
+<text  x="150.07" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#single_value (1) (1 samples, 0.04%)</title><rect x="1149.4" y="349" width="0.6" height="15.0" fill="rgb(205,162,15)" rx="2" ry="2" />
+<text  x="1152.45" y="359.5" ></text>
+</g>
+<g >
+<title>Kernel#sprintf (1000) (11 samples, 0.46%)</title><rect x="235.0" y="109" width="5.5" height="15.0" fill="rgb(245,198,0)" rx="2" ry="2" />
+<text  x="237.95" y="119.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#quote_identifier_append (1000) (22 samples, 0.92%)</title><rect x="1131.0" y="301" width="10.9" height="15.0" fill="rgb(248,106,50)" rx="2" ry="2" />
+<text  x="1134.03" y="311.5" ></text>
+</g>
+<g >
+<title>&lt;Class::Thread&gt;#current (1000) (1 samples, 0.04%)</title><rect x="254.1" y="125" width="0.4" height="15.0" fill="rgb(240,173,16)" rx="2" ry="2" />
+<text  x="257.12" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Dataset#fetch_rows (1000) (1,676 samples, 69.97%)</title><rect x="283.8" y="333" width="825.9" height="15.0" fill="rgb(238,13,7)" rx="2" ry="2" />
+<text  x="286.82" y="343.5" >Sequel::Postgres::Dataset#fetch_rows (1000)</text>
+</g>
+<g >
+<title>ProductRepository#insert (2) (2,324 samples, 97.02%)</title><rect x="10.0" y="429" width="1144.7" height="15.0" fill="rgb(210,152,5)" rx="2" ry="2" />
+<text  x="13.03" y="439.5" >ProductRepository#insert (2)</text>
+</g>
+<g >
+<title>Kernel#hash (1000) (1 samples, 0.04%)</title><rect x="1096.2" y="189" width="0.4" height="15.0" fill="rgb(246,78,32)" rx="2" ry="2" />
+<text  x="1099.23" y="199.5" ></text>
+</g>
+<g >
+<title>Array#all? (1000) (3 samples, 0.13%)</title><rect x="274.4" y="237" width="1.4" height="15.0" fill="rgb(217,189,22)" rx="2" ry="2" />
+<text  x="277.35" y="247.5" ></text>
+</g>
+<g >
+<title>Kernel#sprintf (1000) (3 samples, 0.13%)</title><rect x="231.2" y="109" width="1.3" height="15.0" fill="rgb(250,178,38)" rx="2" ry="2" />
+<text  x="234.18" y="119.5" ></text>
+</g>
+<g >
+<title>ArrayDatabase#insert (1000) (1 samples, 0.04%)</title><rect x="24.7" y="397" width="0.3" height="15.0" fill="rgb(246,95,48)" rx="2" ry="2" />
+<text  x="27.66" y="407.5" ></text>
+</g>
+<g >
+<title>Kernel#Array (1000) (1 samples, 0.04%)</title><rect x="121.9" y="301" width="0.4" height="15.0" fill="rgb(230,116,54)" rx="2" ry="2" />
+<text  x="124.87" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#skip_logging? (1000) (1 samples, 0.04%)</title><rect x="1055.2" y="157" width="0.5" height="15.0" fill="rgb(239,15,36)" rx="2" ry="2" />
+<text  x="1058.18" y="167.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#owned_connection (1000) (6 samples, 0.25%)</title><rect x="1098.1" y="253" width="3.0" height="15.0" fill="rgb(236,176,43)" rx="2" ry="2" />
+<text  x="1101.10" y="263.5" ></text>
+</g>
+<g >
+<title>Regexp#match (3000) (8 samples, 0.33%)</title><rect x="1176.0" y="109" width="4.1" height="15.0" fill="rgb(227,11,51)" rx="2" ry="2" />
+<text  x="1178.99" y="119.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#quote_identifiers? (1000) (3 samples, 0.13%)</title><rect x="1135.1" y="285" width="1.3" height="15.0" fill="rgb(244,190,16)" rx="2" ry="2" />
+<text  x="1138.10" y="295.5" ></text>
+</g>
+<g >
+<title>Time#initialize (1000) (1 samples, 0.04%)</title><rect x="1168.1" y="125" width="0.3" height="15.0" fill="rgb(254,203,3)" rx="2" ry="2" />
+<text  x="1171.10" y="135.5" ></text>
+</g>
+<g >
+<title>DateTime#strftime (1000) (7 samples, 0.29%)</title><rect x="202.4" y="141" width="3.6" height="15.0" fill="rgb(248,23,12)" rx="2" ry="2" />
+<text  x="205.44" y="151.5" ></text>
+</g>
+<g >
+<title>Hash#each_key (1000) (4 samples, 0.17%)</title><rect x="71.6" y="317" width="2.2" height="15.0" fill="rgb(225,122,37)" rx="2" ry="2" />
+<text  x="74.56" y="327.5" ></text>
+</g>
+<g >
+<title>Thread::ConditionVariable#signal (1000) (1 samples, 0.04%)</title><rect x="272.2" y="93" width="0.3" height="15.0" fill="rgb(236,42,37)" rx="2" ry="2" />
+<text  x="275.16" y="103.5" ></text>
+</g>
+<g >
+<title>String#gsub (1000) (2 samples, 0.08%)</title><rect x="139.0" y="173" width="1.1" height="15.0" fill="rgb(223,14,16)" rx="2" ry="2" />
+<text  x="141.95" y="183.5" ></text>
+</g>
+<g >
+<title>String#gsub! (1000) (5 samples, 0.21%)</title><rect x="1180.7" y="109" width="2.3" height="15.0" fill="rgb(221,86,16)" rx="2" ry="2" />
+<text  x="1183.73" y="119.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#to_application_timestamp (1000) (51 samples, 2.13%)</title><rect x="1163.2" y="205" width="25.4" height="15.0" fill="rgb(213,143,29)" rx="2" ry="2" />
+<text  x="1166.24" y="215.5" >S..</text>
+</g>
+<g >
+<title>Class#new (1000) (6 samples, 0.25%)</title><rect x="1115.7" y="365" width="3.2" height="15.0" fill="rgb(236,222,17)" rx="2" ry="2" />
+<text  x="1118.73" y="375.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#_execute (1) (1 samples, 0.04%)</title><rect x="1149.5" y="221" width="0.4" height="15.0" fill="rgb(209,36,13)" rx="2" ry="2" />
+<text  x="1152.46" y="231.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#supports_cte? (1000) (5 samples, 0.21%)</title><rect x="143.1" y="301" width="2.4" height="15.0" fill="rgb(205,79,46)" rx="2" ry="2" />
+<text  x="146.11" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#insert_into_sql (1000) (25 samples, 1.04%)</title><rect x="148.4" y="317" width="12.5" height="15.0" fill="rgb(222,191,40)" rx="2" ry="2" />
+<text  x="151.36" y="327.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#log_connection_yield (1) (1 samples, 0.04%)</title><rect x="1149.5" y="157" width="0.4" height="15.0" fill="rgb(220,120,49)" rx="2" ry="2" />
+<text  x="1152.47" y="167.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (10 samples, 0.42%)</title><rect x="258.0" y="93" width="5.0" height="15.0" fill="rgb(218,98,11)" rx="2" ry="2" />
+<text  x="260.97" y="103.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_append (1000) (31 samples, 1.29%)</title><rect x="126.4" y="253" width="15.1" height="15.0" fill="rgb(230,161,37)" rx="2" ry="2" />
+<text  x="129.41" y="263.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Dataset#fetch_rows (1) (1 samples, 0.04%)</title><rect x="1149.5" y="317" width="0.4" height="15.0" fill="rgb(247,210,4)" rx="2" ry="2" />
+<text  x="1152.45" y="327.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (2000) (2 samples, 0.08%)</title><rect x="1134.3" y="285" width="0.8" height="15.0" fill="rgb(241,71,49)" rx="2" ry="2" />
+<text  x="1137.25" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#each (1) (71 samples, 2.96%)</title><rect x="1154.8" y="381" width="35.2" height="15.0" fill="rgb(249,118,21)" rx="2" ry="2" />
+<text  x="1157.75" y="391.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#check_database_errors (1) (71 samples, 2.96%)</title><rect x="1154.8" y="285" width="35.0" height="15.0" fill="rgb(216,103,20)" rx="2" ry="2" />
+<text  x="1157.77" y="295.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::Database#from_application_timestamp (1000) (6 samples, 0.25%)</title><rect x="206.0" y="141" width="3.1" height="15.0" fill="rgb(238,41,23)" rx="2" ry="2" />
+<text  x="209.04" y="151.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#identifier_list_append (1000) (54 samples, 2.25%)</title><rect x="91.9" y="301" width="26.4" height="15.0" fill="rgb(210,70,20)" rx="2" ry="2" />
+<text  x="94.95" y="311.5" >S..</text>
+</g>
+<g >
+<title>PG::Connection#exec (1) (1 samples, 0.04%)</title><rect x="1149.5" y="141" width="0.4" height="15.0" fill="rgb(245,8,48)" rx="2" ry="2" />
+<text  x="1152.47" y="151.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#convert_timestamp (1000) (49 samples, 2.05%)</title><rect x="1164.2" y="189" width="24.4" height="15.0" fill="rgb(237,35,44)" rx="2" ry="2" />
+<text  x="1167.25" y="199.5" >S..</text>
+</g>
+<g >
+<title>Module#=== (1000) (0 samples, 0.00%)</title><rect x="1166.5" y="157" width="0.2" height="15.0" fill="rgb(211,102,9)" rx="2" ry="2" />
+<text  x="1169.49" y="167.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#check_insert_allowed! (1000) (8 samples, 0.33%)</title><rect x="65.0" y="333" width="4.1" height="15.0" fill="rgb(227,217,14)" rx="2" ry="2" />
+<text  x="67.98" y="343.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#split_symbol (1000) (8 samples, 0.33%)</title><rect x="1145.7" y="269" width="3.7" height="15.0" fill="rgb(252,138,31)" rx="2" ry="2" />
+<text  x="1148.72" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#quote_schema_table_append (1000) (42 samples, 1.75%)</title><rect x="1129.0" y="317" width="20.4" height="15.0" fill="rgb(226,71,10)" rx="2" ry="2" />
+<text  x="1131.99" y="327.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#synchronize (1001) (10 samples, 0.42%)</title><rect x="1150.0" y="349" width="4.7" height="15.0" fill="rgb(235,2,6)" rx="2" ry="2" />
+<text  x="1152.98" y="359.5" ></text>
+</g>
+<g >
+<title>&lt;Class::Hash&gt;#[] (1000) (1 samples, 0.04%)</title><rect x="43.6" y="317" width="0.6" height="15.0" fill="rgb(238,214,37)" rx="2" ry="2" />
+<text  x="46.58" y="327.5" ></text>
+</g>
+<g >
+<title>Thread::ConditionVariable#signal (1000) (1 samples, 0.04%)</title><rect x="1109.3" y="205" width="0.4" height="15.0" fill="rgb(252,35,23)" rx="2" ry="2" />
+<text  x="1112.29" y="215.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#execute (1) (71 samples, 2.96%)</title><rect x="1154.8" y="253" width="35.0" height="15.0" fill="rgb(227,4,7)" rx="2" ry="2" />
+<text  x="1157.77" y="263.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#sync (1000) (10 samples, 0.42%)</title><rect x="1093.0" y="221" width="5.1" height="15.0" fill="rgb(212,144,42)" rx="2" ry="2" />
+<text  x="1095.99" y="231.5" ></text>
+</g>
+<g >
+<title>MatchData#begin (2000) (2 samples, 0.08%)</title><rect x="1174.8" y="109" width="0.9" height="15.0" fill="rgb(206,60,13)" rx="2" ry="2" />
+<text  x="1177.76" y="119.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#server_version (1000) (3 samples, 0.13%)</title><rect x="144.2" y="285" width="1.3" height="15.0" fill="rgb(246,102,9)" rx="2" ry="2" />
+<text  x="147.15" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#execute_query (1) (1 samples, 0.04%)</title><rect x="1149.5" y="173" width="0.4" height="15.0" fill="rgb(231,43,37)" rx="2" ry="2" />
+<text  x="1152.47" y="183.5" ></text>
+</g>
+<g >
+<title>Method#call (1000) (53 samples, 2.21%)</title><rect x="1162.7" y="221" width="25.9" height="15.0" fill="rgb(220,202,46)" rx="2" ry="2" />
+<text  x="1165.71" y="231.5" >M..</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#sync (1000) (4 samples, 0.17%)</title><rect x="1098.9" y="237" width="2.2" height="15.0" fill="rgb(231,37,50)" rx="2" ry="2" />
+<text  x="1101.94" y="247.5" ></text>
+</g>
+<g >
+<title>Hash#has_key? (1000) (1 samples, 0.04%)</title><rect x="121.5" y="301" width="0.4" height="15.0" fill="rgb(212,133,2)" rx="2" ry="2" />
+<text  x="124.45" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#synchronize (3000) (9 samples, 0.38%)</title><rect x="112.1" y="221" width="4.6" height="15.0" fill="rgb(209,207,17)" rx="2" ry="2" />
+<text  x="115.14" y="231.5" ></text>
+</g>
+<g >
+<title>String#gsub (1000) (4 samples, 0.17%)</title><rect x="1138.4" y="269" width="2.0" height="15.0" fill="rgb(244,94,43)" rx="2" ry="2" />
+<text  x="1141.39" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#hold (1) (1 samples, 0.04%)</title><rect x="1149.5" y="253" width="0.4" height="15.0" fill="rgb(250,193,21)" rx="2" ry="2" />
+<text  x="1152.46" y="263.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_append (1000) (13 samples, 0.54%)</title><rect x="153.1" y="285" width="6.4" height="15.0" fill="rgb(208,148,25)" rx="2" ry="2" />
+<text  x="156.05" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Dataset#fetch_rows_set_cols (1000) (42 samples, 1.75%)</title><rect x="1055.7" y="205" width="20.8" height="15.0" fill="rgb(253,133,38)" rx="2" ry="2" />
+<text  x="1058.70" y="215.5" ></text>
+</g>
+<g >
+<title>&lt;Class::Time&gt;#parse (1000) (41 samples, 1.71%)</title><rect x="1168.4" y="141" width="20.2" height="15.0" fill="rgb(234,103,43)" rx="2" ry="2" />
+<text  x="1171.36" y="151.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (1000) (1 samples, 0.04%)</title><rect x="298.4" y="221" width="0.4" height="15.0" fill="rgb(245,79,37)" rx="2" ry="2" />
+<text  x="301.40" y="231.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#synchronize (1000) (53 samples, 2.21%)</title><rect x="246.3" y="173" width="26.2" height="15.0" fill="rgb(217,34,2)" rx="2" ry="2" />
+<text  x="249.31" y="183.5" >S..</text>
+</g>
+<g >
+<title>Sequel::SequelMethods#synchronize (1000) (4 samples, 0.17%)</title><rect x="157.1" y="253" width="1.8" height="15.0" fill="rgb(242,107,47)" rx="2" ry="2" />
+<text  x="160.10" y="263.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#current (1000) (2 samples, 0.08%)</title><rect x="253.4" y="141" width="1.1" height="15.0" fill="rgb(223,76,20)" rx="2" ry="2" />
+<text  x="256.36" y="151.5" ></text>
+</g>
+<g >
+<title>Array#each (1000) (192 samples, 8.02%)</title><rect x="177.9" y="221" width="94.6" height="15.0" fill="rgb(242,15,0)" rx="2" ry="2" />
+<text  x="180.91" y="231.5" >Array#each ..</text>
+</g>
+<g >
+<title>Sequel::Database#timezone (1000) (1 samples, 0.04%)</title><rect x="1163.9" y="189" width="0.3" height="15.0" fill="rgb(237,99,16)" rx="2" ry="2" />
+<text  x="1166.91" y="199.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#quote_identifier_append (1000) (18 samples, 0.75%)</title><rect x="132.7" y="205" width="8.8" height="15.0" fill="rgb(247,120,35)" rx="2" ry="2" />
+<text  x="135.65" y="215.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#schema_and_table (1000) (15 samples, 0.63%)</title><rect x="1141.9" y="301" width="7.5" height="15.0" fill="rgb(249,62,32)" rx="2" ry="2" />
+<text  x="1144.94" y="311.5" ></text>
+</g>
+<g >
+<title>&lt;Class::Time&gt;#make_time (1000) (11 samples, 0.46%)</title><rect x="1183.0" y="125" width="5.4" height="15.0" fill="rgb(241,131,51)" rx="2" ry="2" />
+<text  x="1185.98" y="135.5" ></text>
+</g>
+<g >
+<title>&lt;Object::Object&gt;#call (1000) (3 samples, 0.13%)</title><rect x="1161.1" y="221" width="1.6" height="15.0" fill="rgb(210,121,31)" rx="2" ry="2" />
+<text  x="1164.14" y="231.5" ></text>
+</g>
+<g >
+<title>&lt;Class::DateTime&gt;#now (2000) (20 samples, 0.83%)</title><rect x="14.7" y="397" width="10.0" height="15.0" fill="rgb(245,86,24)" rx="2" ry="2" />
+<text  x="17.69" y="407.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#literal_symbol (1000) (6 samples, 0.25%)</title><rect x="156.2" y="269" width="2.7" height="15.0" fill="rgb(218,71,49)" rx="2" ry="2" />
+<text  x="159.22" y="279.5" ></text>
+</g>
+<g >
+<title>Kernel#respond_to? (1000) (2 samples, 0.08%)</title><rect x="303.8" y="205" width="0.9" height="15.0" fill="rgb(231,66,21)" rx="2" ry="2" />
+<text  x="306.79" y="215.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#sync (1000) (12 samples, 0.50%)</title><rect x="257.2" y="109" width="5.8" height="15.0" fill="rgb(219,74,24)" rx="2" ry="2" />
+<text  x="260.24" y="119.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#cache_get (1000) (6 samples, 0.25%)</title><rect x="44.2" y="317" width="2.9" height="15.0" fill="rgb(224,120,2)" rx="2" ry="2" />
+<text  x="47.20" y="327.5" ></text>
+</g>
+<g >
+<title>Module#=== (1000) (1 samples, 0.04%)</title><rect x="1118.9" y="365" width="0.4" height="15.0" fill="rgb(247,215,9)" rx="2" ry="2" />
+<text  x="1121.88" y="375.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (1000) (1 samples, 0.04%)</title><rect x="275.5" y="221" width="0.3" height="15.0" fill="rgb(217,31,48)" rx="2" ry="2" />
+<text  x="278.49" y="231.5" ></text>
+</g>
+<g >
+<title>&lt;Class::Hash&gt;#[] (1000) (1 samples, 0.04%)</title><rect x="77.7" y="285" width="0.4" height="15.0" fill="rgb(250,38,43)" rx="2" ry="2" />
+<text  x="80.68" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#acquire (1000) (17 samples, 0.71%)</title><rect x="254.5" y="141" width="8.5" height="15.0" fill="rgb(243,12,20)" rx="2" ry="2" />
+<text  x="257.54" y="151.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#supports_returning? (1000) (1 samples, 0.04%)</title><rect x="48.9" y="365" width="0.6" height="15.0" fill="rgb(221,99,52)" rx="2" ry="2" />
+<text  x="51.91" y="375.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (2000) (2 samples, 0.08%)</title><rect x="63.8" y="333" width="0.8" height="15.0" fill="rgb(253,34,1)" rx="2" ry="2" />
+<text  x="66.85" y="343.5" ></text>
+</g>
+<g >
+<title>Sequel::SQL::Identifier#initialize (1000) (3 samples, 0.13%)</title><rect x="1117.2" y="349" width="1.7" height="15.0" fill="rgb(208,131,6)" rx="2" ry="2" />
+<text  x="1120.24" y="359.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#convert_output_timestamp (1000) (2 samples, 0.08%)</title><rect x="208.2" y="125" width="0.9" height="15.0" fill="rgb(222,41,31)" rx="2" ry="2" />
+<text  x="211.19" y="135.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (1000) (1 samples, 0.04%)</title><rect x="68.7" y="285" width="0.4" height="15.0" fill="rgb(212,73,25)" rx="2" ry="2" />
+<text  x="71.71" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#initialize_clone (1000) (11 samples, 0.46%)</title><rect x="75.6" y="301" width="5.2" height="15.0" fill="rgb(254,114,1)" rx="2" ry="2" />
+<text  x="78.60" y="311.5" ></text>
+</g>
+<g >
+<title>String#to_s (1000) (1 samples, 0.04%)</title><rect x="141.1" y="173" width="0.4" height="15.0" fill="rgb(212,78,27)" rx="2" ry="2" />
+<text  x="144.13" y="183.5" ></text>
+</g>
+<g >
+<title>&lt;Class::Date&gt;#_parse (1000) (26 samples, 1.09%)</title><rect x="1170.0" y="125" width="13.0" height="15.0" fill="rgb(215,46,40)" rx="2" ry="2" />
+<text  x="1173.01" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#server? (1000) (4 samples, 0.17%)</title><rect x="282.0" y="317" width="1.8" height="15.0" fill="rgb(211,178,6)" rx="2" ry="2" />
+<text  x="285.02" y="327.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (3 samples, 0.13%)</title><rect x="1148.2" y="237" width="1.2" height="15.0" fill="rgb(249,200,44)" rx="2" ry="2" />
+<text  x="1151.16" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#insert_conflict_sql (1000) (2 samples, 0.08%)</title><rect x="147.4" y="317" width="1.0" height="15.0" fill="rgb(211,183,51)" rx="2" ry="2" />
+<text  x="150.43" y="327.5" ></text>
+</g>
+<g >
+<title>Integer#** (1000) (0 samples, 0.00%)</title><rect x="1174.6" y="109" width="0.2" height="15.0" fill="rgb(226,47,35)" rx="2" ry="2" />
+<text  x="1177.56" y="119.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_integer (1000) (3 samples, 0.13%)</title><rect x="242.9" y="189" width="1.5" height="15.0" fill="rgb(246,9,2)" rx="2" ry="2" />
+<text  x="245.94" y="199.5" ></text>
+</g>
+<g >
+<title>Rational#to_i (1000) (1 samples, 0.04%)</title><rect x="240.1" y="77" width="0.4" height="15.0" fill="rgb(225,158,35)" rx="2" ry="2" />
+<text  x="243.11" y="87.5" ></text>
+</g>
+<g >
+<title>Array#include? (1000) (1 samples, 0.04%)</title><rect x="37.3" y="333" width="0.6" height="15.0" fill="rgb(219,189,17)" rx="2" ry="2" />
+<text  x="40.32" y="343.5" ></text>
+</g>
+<g >
+<title>Class#new (1000) (2 samples, 0.08%)</title><rect x="146.3" y="301" width="1.1" height="15.0" fill="rgb(233,49,41)" rx="2" ry="2" />
+<text  x="149.26" y="311.5" ></text>
+</g>
+<g >
+<title>Fiber:1180 (2,395 samples, 99.99%)</title><rect x="10.0" y="461" width="1180.0" height="15.0" fill="rgb(208,117,33)" rx="2" ry="2" />
+<text  x="13.00" y="471.5" >Fiber:1180</text>
+</g>
+<g >
+<title>PG::Connection#exec (1) (2 samples, 0.08%)</title><rect x="1154.8" y="189" width="1.2" height="15.0" fill="rgb(224,208,32)" rx="2" ry="2" />
+<text  x="1157.79" y="199.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#execute (1) (1 samples, 0.04%)</title><rect x="1149.5" y="285" width="0.4" height="15.0" fill="rgb(229,67,37)" rx="2" ry="2" />
+<text  x="1152.46" y="295.5" ></text>
+</g>
+<g >
+<title>Hash#fetch (1000) (1 samples, 0.04%)</title><rect x="1136.0" y="269" width="0.4" height="15.0" fill="rgb(223,183,24)" rx="2" ry="2" />
+<text  x="1139.01" y="279.5" ></text>
+</g>
+<g >
+<title>all (2,395 samples, 100%)</title><rect x="10.0" y="493" width="1180.0" height="15.0" fill="rgb(215,182,29)" rx="2" ry="2" />
+<text  x="13.00" y="503.5" ></text>
+</g>
+<g >
+<title>Kernel#clone (1000) (13 samples, 0.54%)</title><rect x="74.4" y="317" width="6.4" height="15.0" fill="rgb(235,14,35)" rx="2" ry="2" />
+<text  x="77.38" y="327.5" ></text>
+</g>
+<g >
+<title>Kernel#clone (1000) (17 samples, 0.71%)</title><rect x="38.9" y="349" width="8.2" height="15.0" fill="rgb(245,140,2)" rx="2" ry="2" />
+<text  x="41.86" y="359.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#release (1000) (9 samples, 0.38%)</title><rect x="268.1" y="109" width="4.4" height="15.0" fill="rgb(224,52,11)" rx="2" ry="2" />
+<text  x="271.10" y="119.5" ></text>
+</g>
+<g >
+<title>Rational#to_i (1000) (1 samples, 0.04%)</title><rect x="230.0" y="125" width="0.3" height="15.0" fill="rgb(226,117,29)" rx="2" ry="2" />
+<text  x="233.01" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#freeze (1000) (4 samples, 0.17%)</title><rect x="47.1" y="349" width="1.8" height="15.0" fill="rgb(210,143,5)" rx="2" ry="2" />
+<text  x="50.09" y="359.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#log_connection_yield (1000) (1,516 samples, 63.29%)</title><rect x="308.9" y="173" width="746.8" height="15.0" fill="rgb(216,84,31)" rx="2" ry="2" />
+<text  x="311.93" y="183.5" >Sequel::Database#log_connection_yield (1000)</text>
+</g>
+<g >
+<title>Sequel::Dataset#clone (1000) (27 samples, 1.13%)</title><rect x="69.1" y="333" width="13.5" height="15.0" fill="rgb(241,82,54)" rx="2" ry="2" />
+<text  x="72.08" y="343.5" ></text>
+</g>
+<g >
+<title>Kernel#hash (1000) (1 samples, 0.04%)</title><rect x="1107.7" y="189" width="0.5" height="15.0" fill="rgb(240,130,3)" rx="2" ry="2" />
+<text  x="1110.71" y="199.5" ></text>
+</g>
+<g >
+<title>&lt;Class::Thread&gt;#current (1000) (1 samples, 0.04%)</title><rect x="1090.0" y="237" width="0.3" height="15.0" fill="rgb(240,174,30)" rx="2" ry="2" />
+<text  x="1093.01" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#literal_symbol (3000) (14 samples, 0.58%)</title><rect x="109.9" y="237" width="6.8" height="15.0" fill="rgb(228,65,38)" rx="2" ry="2" />
+<text  x="112.92" y="247.5" ></text>
+</g>
+<g >
+<title>Module#=== (2000) (1 samples, 0.04%)</title><rect x="276.2" y="237" width="0.5" height="15.0" fill="rgb(214,55,23)" rx="2" ry="2" />
+<text  x="279.19" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#skip_symbol_cache? (1000) (1 samples, 0.04%)</title><rect x="158.9" y="269" width="0.6" height="15.0" fill="rgb(254,218,28)" rx="2" ry="2" />
+<text  x="161.93" y="279.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (1000) (0 samples, 0.00%)</title><rect x="1165.2" y="173" width="0.2" height="15.0" fill="rgb(221,42,37)" rx="2" ry="2" />
+<text  x="1168.22" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#schema_utility_dataset (1000) (1 samples, 0.04%)</title><rect x="1122.8" y="333" width="0.6" height="15.0" fill="rgb(219,218,33)" rx="2" ry="2" />
+<text  x="1125.81" y="343.5" ></text>
+</g>
+<g >
+<title>Kernel#hash (1000) (1 samples, 0.04%)</title><rect x="270.9" y="77" width="0.4" height="15.0" fill="rgb(230,98,15)" rx="2" ry="2" />
+<text  x="273.92" y="87.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#select_sql (1) (0 samples, 0.00%)</title><rect x="1189.9" y="365" width="0.1" height="15.0" fill="rgb(211,133,25)" rx="2" ry="2" />
+<text  x="1192.86" y="375.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#check_disconnect_errors (1000) (1,523 samples, 63.58%)</title><rect x="305.6" y="205" width="750.1" height="15.0" fill="rgb(237,63,4)" rx="2" ry="2" />
+<text  x="308.57" y="215.5" >Sequel::Postgres::Adapter#check_disconnect_errors (1000)</text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_expression_append (1000) (22 samples, 0.92%)</title><rect x="130.8" y="237" width="10.7" height="15.0" fill="rgb(210,46,5)" rx="2" ry="2" />
+<text  x="133.82" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#hold (1) (71 samples, 2.96%)</title><rect x="1154.8" y="301" width="35.1" height="15.0" fill="rgb(243,211,42)" rx="2" ry="2" />
+<text  x="1157.76" y="311.5" >Se..</text>
+</g>
+<g >
+<title>Array#each (1000) (34 samples, 1.42%)</title><rect x="124.8" y="269" width="16.7" height="15.0" fill="rgb(245,155,51)" rx="2" ry="2" />
+<text  x="127.81" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#sharded? (1000) (1 samples, 0.04%)</title><rect x="287.3" y="301" width="0.5" height="15.0" fill="rgb(207,200,0)" rx="2" ry="2" />
+<text  x="290.31" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#clone (1000) (33 samples, 1.38%)</title><rect x="32.7" y="365" width="16.2" height="15.0" fill="rgb(246,49,29)" rx="2" ry="2" />
+<text  x="35.71" y="375.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#expression_list_append (1000) (36 samples, 1.50%)</title><rect x="123.7" y="285" width="17.8" height="15.0" fill="rgb(218,228,7)" rx="2" ry="2" />
+<text  x="126.65" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#quote_schema_table (1000) (57 samples, 2.38%)</title><rect x="1121.2" y="349" width="28.2" height="15.0" fill="rgb(237,81,14)" rx="2" ry="2" />
+<text  x="1124.16" y="359.5" >S..</text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#execute_query (1000) (1,519 samples, 63.42%)</title><rect x="307.4" y="189" width="748.3" height="15.0" fill="rgb(244,226,14)" rx="2" ry="2" />
+<text  x="310.44" y="199.5" >Sequel::Postgres::Adapter#execute_query (1000)</text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_array_append (1000) (211 samples, 8.81%)</title><rect x="172.9" y="269" width="103.8" height="15.0" fill="rgb(206,145,2)" rx="2" ry="2" />
+<text  x="175.91" y="279.5" >Sequel::Data..</text>
+</g>
+<g >
+<title>Kernel#freeze (1000) (1 samples, 0.04%)</title><rect x="32.3" y="365" width="0.4" height="15.0" fill="rgb(233,151,23)" rx="2" ry="2" />
+<text  x="35.35" y="375.5" ></text>
+</g>
+<g >
+<title>Array#shift (1000) (1 samples, 0.04%)</title><rect x="262.5" y="61" width="0.5" height="15.0" fill="rgb(236,144,29)" rx="2" ry="2" />
+<text  x="265.50" y="71.5" ></text>
+</g>
+<g >
+<title>Array#first (1000) (1 samples, 0.04%)</title><rect x="1086.7" y="189" width="0.4" height="15.0" fill="rgb(240,168,4)" rx="2" ry="2" />
+<text  x="1089.70" y="199.5" ></text>
+</g>
+<g >
+<title>String#[]= (2000) (1 samples, 0.04%)</title><rect x="1180.1" y="109" width="0.6" height="15.0" fill="rgb(214,95,17)" rx="2" ry="2" />
+<text  x="1183.11" y="119.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#check_database_errors (1) (1 samples, 0.04%)</title><rect x="1149.5" y="237" width="0.4" height="15.0" fill="rgb(245,154,8)" rx="2" ry="2" />
+<text  x="1152.46" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_append (1000) (226 samples, 9.44%)</title><rect x="165.2" y="285" width="111.5" height="15.0" fill="rgb(238,64,31)" rx="2" ry="2" />
+<text  x="168.24" y="295.5" >Sequel::Datas..</text>
+</g>
+<g >
+<title>Sequel::Dataset#format_timestamp_offset (1000) (4 samples, 0.17%)</title><rect x="230.3" y="125" width="2.2" height="15.0" fill="rgb(216,39,53)" rx="2" ry="2" />
+<text  x="233.35" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#quoted_identifier_append (1000) (9 samples, 0.38%)</title><rect x="1136.4" y="285" width="4.4" height="15.0" fill="rgb(242,27,6)" rx="2" ry="2" />
+<text  x="1139.41" y="295.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (3000) (5 samples, 0.21%)</title><rect x="114.4" y="205" width="2.3" height="15.0" fill="rgb(232,21,37)" rx="2" ry="2" />
+<text  x="117.39" y="215.5" ></text>
+</g>
+<g >
+<title>Integer#times (1000) (16 samples, 0.67%)</title><rect x="1061.4" y="189" width="7.7" height="15.0" fill="rgb(216,190,30)" rx="2" ry="2" />
+<text  x="1064.36" y="199.5" ></text>
+</g>
+<g >
+<title>Hash#fetch (1000) (1 samples, 0.04%)</title><rect x="137.0" y="173" width="0.5" height="15.0" fill="rgb(210,84,53)" rx="2" ry="2" />
+<text  x="140.03" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#insert (1000) (2,156 samples, 90.01%)</title><rect x="49.5" y="381" width="1062.1" height="15.0" fill="rgb(214,130,19)" rx="2" ry="2" />
+<text  x="52.45" y="391.5" >Sequel::Postgres::DatasetMethods#insert (1000)</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#sync (1000) (4 samples, 0.17%)</title><rect x="263.9" y="125" width="2.1" height="15.0" fill="rgb(221,15,5)" rx="2" ry="2" />
+<text  x="266.89" y="135.5" ></text>
+</g>
+<g >
+<title>Time#getlocal (1000) (2 samples, 0.08%)</title><rect x="1187.5" y="109" width="0.9" height="15.0" fill="rgb(214,191,27)" rx="2" ry="2" />
+<text  x="1190.47" y="119.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#execute (1) (1 samples, 0.04%)</title><rect x="1149.5" y="301" width="0.4" height="15.0" fill="rgb(216,199,30)" rx="2" ry="2" />
+<text  x="1152.45" y="311.5" ></text>
+</g>
+<g >
+<title>Hash#each (1000) (6 samples, 0.25%)</title><rect x="61.0" y="333" width="2.8" height="15.0" fill="rgb(222,16,54)" rx="2" ry="2" />
+<text  x="63.98" y="343.5" ></text>
+</g>
+<g >
+<title>Kernel#block_given? (1000) (0 samples, 0.00%)</title><rect x="1188.4" y="125" width="0.2" height="15.0" fill="rgb(210,182,24)" rx="2" ry="2" />
+<text  x="1191.43" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#timestamp_precision (1000) (3 samples, 0.13%)</title><rect x="241.1" y="125" width="1.3" height="15.0" fill="rgb(246,83,21)" rx="2" ry="2" />
+<text  x="244.08" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#synchronize (1000) (4 samples, 0.17%)</title><rect x="45.1" y="301" width="2.0" height="15.0" fill="rgb(205,26,33)" rx="2" ry="2" />
+<text  x="48.07" y="311.5" ></text>
+</g>
+<g >
+<title>Module#=== (20000) (11 samples, 0.46%)</title><rect x="191.7" y="189" width="5.4" height="15.0" fill="rgb(208,115,29)" rx="2" ry="2" />
+<text  x="194.69" y="199.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#sync (1000) (13 samples, 0.54%)</title><rect x="266.0" y="141" width="6.5" height="15.0" fill="rgb(224,88,30)" rx="2" ry="2" />
+<text  x="268.98" y="151.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#quote_identifiers? (1000) (2 samples, 0.08%)</title><rect x="136.2" y="189" width="1.3" height="15.0" fill="rgb(232,166,34)" rx="2" ry="2" />
+<text  x="139.24" y="199.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#synchronize (1) (71 samples, 2.96%)</title><rect x="1154.8" y="317" width="35.1" height="15.0" fill="rgb(220,47,23)" rx="2" ry="2" />
+<text  x="1157.76" y="327.5" >Se..</text>
+</g>
+<g >
+<title>Kernel#dup (1000) (6 samples, 0.25%)</title><rect x="1126.0" y="317" width="3.0" height="15.0" fill="rgb(250,95,3)" rx="2" ry="2" />
+<text  x="1129.00" y="327.5" ></text>
+</g>
+<g >
+<title>[global]#[no method] (1) (2,395 samples, 99.99%)</title><rect x="10.0" y="445" width="1180.0" height="15.0" fill="rgb(234,180,32)" rx="2" ry="2" />
+<text  x="13.00" y="455.5" >[global]#[no method] (1)</text>
+</g>
+<g >
+<title>&lt;Object::Object&gt;#call (1000) (4 samples, 0.17%)</title><rect x="1084.5" y="189" width="2.2" height="15.0" fill="rgb(241,51,37)" rx="2" ry="2" />
+<text  x="1087.48" y="199.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatabaseMethods#server_version (1000) (1 samples, 0.04%)</title><rect x="160.3" y="285" width="0.6" height="15.0" fill="rgb(231,228,15)" rx="2" ry="2" />
+<text  x="163.35" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#execute (1000) (1,605 samples, 67.01%)</title><rect x="298.8" y="221" width="790.5" height="15.0" fill="rgb(208,29,45)" rx="2" ry="2" />
+<text  x="301.81" y="231.5" >Sequel::Postgres::Adapter#execute (1000)</text>
+</g>
+<g >
+<title>Hash#each_key (1000) (4 samples, 0.17%)</title><rect x="36.0" y="349" width="1.9" height="15.0" fill="rgb(246,117,15)" rx="2" ry="2" />
+<text  x="39.00" y="359.5" ></text>
+</g>
+<g >
+<title>Integer#times (2) (2,324 samples, 97.02%)</title><rect x="10.0" y="413" width="1144.7" height="15.0" fill="rgb(223,55,26)" rx="2" ry="2" />
+<text  x="13.04" y="423.5" >Integer#times (2)</text>
+</g>
+<g >
+<title>Sequel::SequelMethods#convert_input_timestamp (1000) (47 samples, 1.96%)</title><rect x="1165.4" y="173" width="23.2" height="15.0" fill="rgb(244,153,12)" rx="2" ry="2" />
+<text  x="1168.42" y="183.5" >S..</text>
+</g>
+<g >
+<title>Sequel::Dataset#returning (1000) (40 samples, 1.67%)</title><rect x="29.7" y="381" width="19.8" height="15.0" fill="rgb(224,100,42)" rx="2" ry="2" />
+<text  x="32.75" y="391.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#_insert_sql (1000) (398 samples, 16.62%)</title><rect x="82.6" y="333" width="195.8" height="15.0" fill="rgb(234,147,18)" rx="2" ry="2" />
+<text  x="85.56" y="343.5" >Sequel::Postgres::Dataset..</text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#execute (1000) (1,668 samples, 69.64%)</title><rect x="287.8" y="301" width="821.9" height="15.0" fill="rgb(209,182,33)" rx="2" ry="2" />
+<text  x="290.82" y="311.5" >Sequel::Postgres::Database#execute (1000)</text>
+</g>
+<g >
+<title>Sequel::Dataset#identifier_append (1000) (17 samples, 0.71%)</title><rect x="151.0" y="301" width="8.5" height="15.0" fill="rgb(220,0,3)" rx="2" ry="2" />
+<text  x="154.04" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatabaseMethods#server_version (1000) (1 samples, 0.04%)</title><rect x="145.0" y="269" width="0.5" height="15.0" fill="rgb(244,48,30)" rx="2" ry="2" />
+<text  x="148.01" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#sql_string_origin (1000) (4 samples, 0.17%)</title><rect x="145.5" y="317" width="1.9" height="15.0" fill="rgb(223,13,17)" rx="2" ry="2" />
+<text  x="148.50" y="327.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#returning_fetch_rows (1000) (1,687 samples, 70.43%)</title><rect x="278.4" y="349" width="831.3" height="15.0" fill="rgb(228,86,8)" rx="2" ry="2" />
+<text  x="281.42" y="359.5" >Sequel::Dataset#returning_fetch_rows (1000)</text>
+</g>
+<g >
+<title>String#initialize_copy (1000) (1 samples, 0.04%)</title><rect x="1128.4" y="285" width="0.6" height="15.0" fill="rgb(243,30,26)" rx="2" ry="2" />
+<text  x="1131.38" y="295.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (3 samples, 0.13%)</title><rect x="264.6" y="109" width="1.4" height="15.0" fill="rgb(213,161,36)" rx="2" ry="2" />
+<text  x="267.64" y="119.5" ></text>
+</g>
+<g >
+<title>Module#=== (5000) (4 samples, 0.17%)</title><rect x="129.0" y="237" width="1.8" height="15.0" fill="rgb(206,21,50)" rx="2" ry="2" />
+<text  x="132.05" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::SQL::Identifier#to_s_append (1000) (20 samples, 0.83%)</title><rect x="131.7" y="221" width="9.8" height="15.0" fill="rgb(235,103,16)" rx="2" ry="2" />
+<text  x="134.73" y="231.5" ></text>
+</g>
+<g >
+<title>Array#first (1000) (1 samples, 0.04%)</title><rect x="150.7" y="301" width="0.3" height="15.0" fill="rgb(248,94,33)" rx="2" ry="2" />
+<text  x="153.73" y="311.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (2 samples, 0.08%)</title><rect x="45.9" y="285" width="1.2" height="15.0" fill="rgb(224,221,43)" rx="2" ry="2" />
+<text  x="48.93" y="295.5" ></text>
+</g>
+<g >
+<title>Array#map (1000) (3 samples, 0.13%)</title><rect x="1059.8" y="189" width="1.6" height="15.0" fill="rgb(235,118,5)" rx="2" ry="2" />
+<text  x="1062.80" y="199.5" ></text>
+</g>
+<g >
+<title>Integer#to_s (1000) (1 samples, 0.04%)</title><rect x="243.8" y="173" width="0.6" height="15.0" fill="rgb(248,112,44)" rx="2" ry="2" />
+<text  x="246.75" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#quote_schema_table (1000) (53 samples, 2.21%)</title><rect x="1123.4" y="333" width="26.0" height="15.0" fill="rgb(208,16,23)" rx="2" ry="2" />
+<text  x="1126.41" y="343.5" >S..</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#next_available (1000) (3 samples, 0.13%)</title><rect x="261.5" y="77" width="1.5" height="15.0" fill="rgb(237,152,25)" rx="2" ry="2" />
+<text  x="264.46" y="87.5" ></text>
+</g>
+<g >
+<title>Rational#* (1000) (1 samples, 0.04%)</title><rect x="1187.2" y="109" width="0.3" height="15.0" fill="rgb(235,175,42)" rx="2" ry="2" />
+<text  x="1190.15" y="119.5" ></text>
+</g>
+<g >
+<title>Module#=== (1000) (1 samples, 0.04%)</title><rect x="1144.4" y="285" width="0.4" height="15.0" fill="rgb(211,6,38)" rx="2" ry="2" />
+<text  x="1147.39" y="295.5" ></text>
+</g>
+<g >
+<title>Integer#to_s (2000) (2 samples, 0.08%)</title><rect x="25.0" y="397" width="1.1" height="15.0" fill="rgb(250,208,45)" rx="2" ry="2" />
+<text  x="28.04" y="407.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#checkin_connection (1000) (2 samples, 0.08%)</title><rect x="271.3" y="93" width="0.9" height="15.0" fill="rgb(218,14,25)" rx="2" ry="2" />
+<text  x="274.25" y="103.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#hold (1000) (1,664 samples, 69.47%)</title><rect x="290.1" y="269" width="819.6" height="15.0" fill="rgb(206,47,39)" rx="2" ry="2" />
+<text  x="293.12" y="279.5" >Sequel::ThreadedConnectionPool#hold (1000)</text>
+</g>
+<g >
+<title>Sequel::Postgres::DatabaseMethods#server_version (1000) (1 samples, 0.04%)</title><rect x="277.8" y="301" width="0.6" height="15.0" fill="rgb(229,171,47)" rx="2" ry="2" />
+<text  x="280.85" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#identifier_append (3000) (43 samples, 1.80%)</title><rect x="97.3" y="269" width="21.0" height="15.0" fill="rgb(207,166,43)" rx="2" ry="2" />
+<text  x="100.27" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#split_symbol (1000) (10 samples, 0.42%)</title><rect x="1144.8" y="285" width="4.6" height="15.0" fill="rgb(215,29,1)" rx="2" ry="2" />
+<text  x="1147.75" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#insert (1000) (2,153 samples, 89.88%)</title><rect x="51.1" y="365" width="1060.5" height="15.0" fill="rgb(234,60,26)" rx="2" ry="2" />
+<text  x="54.06" y="375.5" >Sequel::Dataset#insert (1000)</text>
+</g>
+<g >
+<title>PG::Result#fname (1000) (2 samples, 0.08%)</title><rect x="1064.7" y="173" width="1.2" height="15.0" fill="rgb(242,128,32)" rx="2" ry="2" />
+<text  x="1067.70" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#supports_returning? (1000) (1 samples, 0.04%)</title><rect x="1111.1" y="333" width="0.5" height="15.0" fill="rgb(240,98,43)" rx="2" ry="2" />
+<text  x="1114.06" y="343.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#check_disconnect_errors (1) (2 samples, 0.08%)</title><rect x="1154.8" y="237" width="1.2" height="15.0" fill="rgb(208,33,15)" rx="2" ry="2" />
+<text  x="1157.78" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#columns= (1000) (14 samples, 0.58%)</title><rect x="1069.7" y="189" width="6.8" height="15.0" fill="rgb(250,224,33)" rx="2" ry="2" />
+<text  x="1072.66" y="199.5" ></text>
+</g>
+<g >
+<title>Rational#* (2000) (3 samples, 0.13%)</title><rect x="228.4" y="125" width="1.6" height="15.0" fill="rgb(249,225,18)" rx="2" ry="2" />
+<text  x="231.42" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#current (1000) (2 samples, 0.08%)</title><rect x="1089.3" y="253" width="1.0" height="15.0" fill="rgb(226,139,20)" rx="2" ry="2" />
+<text  x="1092.29" y="263.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (2000) (1 samples, 0.04%)</title><rect x="135.6" y="189" width="0.6" height="15.0" fill="rgb(245,60,26)" rx="2" ry="2" />
+<text  x="138.62" y="199.5" ></text>
+</g>
+<g >
+<title>Array#shift (1000) (1 samples, 0.04%)</title><rect x="1097.7" y="173" width="0.4" height="15.0" fill="rgb(252,206,32)" rx="2" ry="2" />
+<text  x="1100.68" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Dataset#yield_hash_rows (1000) (26 samples, 1.09%)</title><rect x="1076.5" y="205" width="12.8" height="15.0" fill="rgb(206,47,24)" rx="2" ry="2" />
+<text  x="1079.55" y="215.5" ></text>
+</g>
+<g >
+<title>Module#=== (1000) (1 samples, 0.04%)</title><rect x="64.6" y="333" width="0.4" height="15.0" fill="rgb(215,153,39)" rx="2" ry="2" />
+<text  x="67.62" y="343.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (3 samples, 0.13%)</title><rect x="1099.7" y="221" width="1.4" height="15.0" fill="rgb(253,4,32)" rx="2" ry="2" />
+<text  x="1102.72" y="231.5" ></text>
+</g>
+<g >
+<title>PG::Result#ftype (1000) (1 samples, 0.04%)</title><rect x="1065.9" y="173" width="0.6" height="15.0" fill="rgb(222,102,14)" rx="2" ry="2" />
+<text  x="1068.92" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#default_server (1000) (6 samples, 0.25%)</title><rect x="281.0" y="333" width="2.8" height="15.0" fill="rgb(248,56,30)" rx="2" ry="2" />
+<text  x="284.01" y="343.5" ></text>
+</g>
+<g >
+<title>PG::Result#getvalue (1000) (2 samples, 0.08%)</title><rect x="1087.8" y="189" width="1.0" height="15.0" fill="rgb(206,215,30)" rx="2" ry="2" />
+<text  x="1090.80" y="199.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (2 samples, 0.08%)</title><rect x="157.9" y="237" width="1.0" height="15.0" fill="rgb(233,195,37)" rx="2" ry="2" />
+<text  x="160.92" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#check_database_errors (1000) (1,612 samples, 67.30%)</title><rect x="295.1" y="253" width="794.2" height="15.0" fill="rgb(217,89,45)" rx="2" ry="2" />
+<text  x="298.11" y="263.5" >Sequel::Postgres::Database#check_database_errors (1000)</text>
+</g>
+<g >
+<title>Kernel#initialize_dup (1000) (3 samples, 0.13%)</title><rect x="1127.7" y="301" width="1.3" height="15.0" fill="rgb(254,60,48)" rx="2" ry="2" />
+<text  x="1130.68" y="311.5" ></text>
+</g>
+<g >
+<title>Module#=== (3000) (2 samples, 0.08%)</title><rect x="109.1" y="237" width="0.8" height="15.0" fill="rgb(246,14,47)" rx="2" ry="2" />
+<text  x="112.11" y="247.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (5 samples, 0.21%)</title><rect x="1074.1" y="141" width="2.4" height="15.0" fill="rgb(234,205,52)" rx="2" ry="2" />
+<text  x="1077.12" y="151.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#skip_symbol_cache? (3000) (3 samples, 0.13%)</title><rect x="116.7" y="237" width="1.6" height="15.0" fill="rgb(226,90,40)" rx="2" ry="2" />
+<text  x="119.68" y="247.5" ></text>
+</g>
+<g >
+<title>PG::Connection#exec (1000) (1,509 samples, 63.00%)</title><rect x="312.0" y="157" width="743.2" height="15.0" fill="rgb(210,214,30)" rx="2" ry="2" />
+<text  x="315.03" y="167.5" >PG::Connection#exec (1000)</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#assign_connection (1000) (13 samples, 0.54%)</title><rect x="1091.5" y="237" width="6.6" height="15.0" fill="rgb(209,26,50)" rx="2" ry="2" />
+<text  x="1094.50" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#insert_insert_sql (1000) (2 samples, 0.08%)</title><rect x="118.3" y="317" width="0.9" height="15.0" fill="rgb(252,205,25)" rx="2" ry="2" />
+<text  x="121.34" y="327.5" ></text>
+</g>
+<g >
+<title>String#to_i (1000) (1 samples, 0.04%)</title><rect x="1162.5" y="205" width="0.2" height="15.0" fill="rgb(238,96,34)" rx="2" ry="2" />
+<text  x="1165.46" y="215.5" ></text>
+</g>
+<g >
+<title>Hash#delete (1000) (4 samples, 0.17%)</title><rect x="1106.4" y="205" width="1.8" height="15.0" fill="rgb(233,160,9)" rx="2" ry="2" />
+<text  x="1109.38" y="215.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#execute_query (1) (2 samples, 0.08%)</title><rect x="1154.8" y="221" width="1.2" height="15.0" fill="rgb(241,82,2)" rx="2" ry="2" />
+<text  x="1157.78" y="231.5" ></text>
+</g>
+<g >
+<title>PG::Result#nfields (1000) (1 samples, 0.04%)</title><rect x="1069.1" y="189" width="0.6" height="15.0" fill="rgb(206,180,34)" rx="2" ry="2" />
+<text  x="1072.14" y="199.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#all (1) (71 samples, 2.96%)</title><rect x="1154.7" y="413" width="35.3" height="15.0" fill="rgb(230,23,10)" rx="2" ry="2" />
+<text  x="1157.74" y="423.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::Dataset#each (1) (1 samples, 0.04%)</title><rect x="1149.4" y="333" width="0.5" height="15.0" fill="rgb(216,38,16)" rx="2" ry="2" />
+<text  x="1152.45" y="343.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#string_to_datetime (1000) (45 samples, 1.88%)</title><rect x="1166.7" y="157" width="21.9" height="15.0" fill="rgb(238,131,8)" rx="2" ry="2" />
+<text  x="1169.66" y="167.5" >S..</text>
+</g>
+<g >
+<title>String#gsub (1000) (66 samples, 2.76%)</title><rect x="210.5" y="141" width="32.4" height="15.0" fill="rgb(215,74,14)" rx="2" ry="2" />
+<text  x="213.53" y="151.5" >St..</text>
+</g>
+<g >
+<title>Sequel::Database#synchronize (1) (1 samples, 0.04%)</title><rect x="1149.5" y="269" width="0.4" height="15.0" fill="rgb(217,98,38)" rx="2" ry="2" />
+<text  x="1152.46" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#expression_list_append (1000) (194 samples, 8.10%)</title><rect x="176.7" y="237" width="95.8" height="15.0" fill="rgb(245,199,33)" rx="2" ry="2" />
+<text  x="179.67" y="247.5" >Sequel::Dat..</text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1001) (8 samples, 0.33%)</title><rect x="1150.9" y="333" width="3.8" height="15.0" fill="rgb(239,99,7)" rx="2" ry="2" />
+<text  x="1153.89" y="343.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#server_version (1000) (3 samples, 0.13%)</title><rect x="159.5" y="301" width="1.4" height="15.0" fill="rgb(226,7,1)" rx="2" ry="2" />
+<text  x="162.52" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#release (1000) (12 samples, 0.50%)</title><rect x="1103.9" y="221" width="5.8" height="15.0" fill="rgb(225,166,19)" rx="2" ry="2" />
+<text  x="1106.94" y="231.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Dataset#literal_string_append (1000) (57 samples, 2.38%)</title><rect x="244.4" y="189" width="28.1" height="15.0" fill="rgb(232,224,50)" rx="2" ry="2" />
+<text  x="247.44" y="199.5" >S..</text>
+</g>
+<g >
+<title>Sequel::UnmodifiedIdentifiers::DatasetMethods#input_identifier (1000) (2 samples, 0.08%)</title><rect x="140.4" y="189" width="1.1" height="15.0" fill="rgb(213,180,3)" rx="2" ry="2" />
+<text  x="143.38" y="199.5" ></text>
+</g>
+<g >
+<title>Hash#has_key? (1000) (2 samples, 0.08%)</title><rect x="1153.9" y="317" width="0.8" height="15.0" fill="rgb(241,126,1)" rx="2" ry="2" />
+<text  x="1156.90" y="327.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#insert_pk (1000) (88 samples, 3.67%)</title><rect x="1111.6" y="381" width="43.1" height="15.0" fill="rgb(227,210,22)" rx="2" ry="2" />
+<text  x="1114.59" y="391.5" >Sequ..</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#owned_connection (1000) (6 samples, 0.25%)</title><rect x="263.0" y="141" width="3.0" height="15.0" fill="rgb(230,185,11)" rx="2" ry="2" />
+<text  x="266.02" y="151.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#array_sql_append (1000) (199 samples, 8.31%)</title><rect x="174.6" y="253" width="97.9" height="15.0" fill="rgb(230,77,42)" rx="2" ry="2" />
+<text  x="177.65" y="263.5" >Sequel::Dat..</text>
+</g>
+<g >
+<title>String#to_s (1000) (1 samples, 0.04%)</title><rect x="140.1" y="173" width="0.3" height="15.0" fill="rgb(216,102,12)" rx="2" ry="2" />
+<text  x="143.08" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#next_available (1000) (3 samples, 0.13%)</title><rect x="1096.6" y="189" width="1.5" height="15.0" fill="rgb(252,104,49)" rx="2" ry="2" />
+<text  x="1099.61" y="199.5" ></text>
+</g>
+<g >
+<title>PG::Result#clear (1000) (2 samples, 0.08%)</title><rect x="304.7" y="205" width="0.9" height="15.0" fill="rgb(239,157,6)" rx="2" ry="2" />
+<text  x="307.69" y="215.5" ></text>
+</g>
+<g >
+<title>String#to_i (1000) (3 samples, 0.13%)</title><rect x="1085.4" y="173" width="1.3" height="15.0" fill="rgb(229,86,52)" rx="2" ry="2" />
+<text  x="1088.43" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#insert_values_sql (1000) (235 samples, 9.81%)</title><rect x="160.9" y="317" width="115.8" height="15.0" fill="rgb(232,17,34)" rx="2" ry="2" />
+<text  x="163.86" y="327.5" >Sequel::Postgr..</text>
+</g>
+<g >
+<title>Sequel::Postgres::Dataset#fetch_rows (1) (71 samples, 2.96%)</title><rect x="1154.8" y="365" width="35.1" height="15.0" fill="rgb(254,115,10)" rx="2" ry="2" />
+<text  x="1157.75" y="375.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::Dataset#format_timestamp (1000) (87 samples, 3.63%)</title><rect x="199.9" y="157" width="43.0" height="15.0" fill="rgb(243,219,54)" rx="2" ry="2" />
+<text  x="202.95" y="167.5" >Sequ..</text>
+</g>
+<g >
+<title>Numeric#to_int (1000) (5 samples, 0.21%)</title><rect x="238.1" y="93" width="2.4" height="15.0" fill="rgb(237,12,38)" rx="2" ry="2" />
+<text  x="241.14" y="103.5" ></text>
+</g>
+<g >
+<title>DateTime#offset (1000) (1 samples, 0.04%)</title><rect x="225.2" y="125" width="0.7" height="15.0" fill="rgb(253,210,1)" rx="2" ry="2" />
+<text  x="228.21" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_append (3000) (184 samples, 7.68%)</title><rect x="182.1" y="205" width="90.4" height="15.0" fill="rgb(236,201,21)" rx="2" ry="2" />
+<text  x="185.08" y="215.5" >Sequel::Da..</text>
+</g>
+<g >
+<title>Thread:1160 (2,395 samples, 99.99%)</title><rect x="10.0" y="477" width="1180.0" height="15.0" fill="rgb(215,22,22)" rx="2" ry="2" />
+<text  x="13.00" y="487.5" >Thread:1160</text>
+</g>
+<g >
+<title>Kernel#is_a? (2000) (1 samples, 0.04%)</title><rect x="227.7" y="125" width="0.7" height="15.0" fill="rgb(239,123,31)" rx="2" ry="2" />
+<text  x="230.74" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#joined_dataset? (1000) (4 samples, 0.17%)</title><rect x="67.4" y="301" width="1.7" height="15.0" fill="rgb(236,8,4)" rx="2" ry="2" />
+<text  x="70.35" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#requires_sql_standard_datetimes? (1000) (1 samples, 0.04%)</title><rect x="210.0" y="125" width="0.5" height="15.0" fill="rgb(251,105,42)" rx="2" ry="2" />
+<text  x="213.03" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#synchronize (1000) (1,666 samples, 69.55%)</title><rect x="289.0" y="285" width="820.7" height="15.0" fill="rgb(248,222,15)" rx="2" ry="2" />
+<text  x="292.03" y="295.5" >Sequel::Database#synchronize (1000)</text>
+</g>
+<g >
+<title>Sequel::Dataset#column_list_append (1000) (39 samples, 1.63%)</title><rect x="122.3" y="301" width="19.2" height="15.0" fill="rgb(220,154,2)" rx="2" ry="2" />
+<text  x="125.34" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_datetime_append (1000) (93 samples, 3.88%)</title><rect x="197.1" y="189" width="45.8" height="15.0" fill="rgb(216,179,14)" rx="2" ry="2" />
+<text  x="200.12" y="199.5" >Sequ..</text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#execute (1) (71 samples, 2.96%)</title><rect x="1154.8" y="333" width="35.1" height="15.0" fill="rgb(205,7,40)" rx="2" ry="2" />
+<text  x="1157.76" y="343.5" >Se..</text>
+</g>
+<g >
+<title>Integer#divmod (1000) (2 samples, 0.08%)</title><rect x="227.0" y="125" width="0.7" height="15.0" fill="rgb(220,10,17)" rx="2" ry="2" />
+<text  x="230.00" y="135.5" ></text>
+</g>
+<g >
+<title>Kernel#freeze (1000) (1 samples, 0.04%)</title><rect x="1118.5" y="333" width="0.4" height="15.0" fill="rgb(216,49,17)" rx="2" ry="2" />
+<text  x="1121.49" y="343.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Adapter#execute (1) (1 samples, 0.04%)</title><rect x="1149.5" y="205" width="0.4" height="15.0" fill="rgb(247,142,5)" rx="2" ry="2" />
+<text  x="1152.46" y="215.5" ></text>
+</g>
+<g >
+<title>Hash#values (1000) (1 samples, 0.04%)</title><rect x="1087.1" y="189" width="0.7" height="15.0" fill="rgb(237,135,3)" rx="2" ry="2" />
+<text  x="1090.11" y="199.5" ></text>
+</g>
+<g >
+<title>Array#include? (2000) (2 samples, 0.08%)</title><rect x="73.0" y="301" width="0.8" height="15.0" fill="rgb(216,4,48)" rx="2" ry="2" />
+<text  x="76.02" y="311.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#default_timestamp_format (1000) (3 samples, 0.13%)</title><rect x="209.1" y="141" width="1.4" height="15.0" fill="rgb(215,39,16)" rx="2" ry="2" />
+<text  x="212.07" y="151.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#timezone (1000) (2 samples, 0.08%)</title><rect x="207.3" y="125" width="0.9" height="15.0" fill="rgb(207,43,53)" rx="2" ry="2" />
+<text  x="210.33" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#_all (1) (71 samples, 2.96%)</title><rect x="1154.7" y="397" width="35.3" height="15.0" fill="rgb(234,210,43)" rx="2" ry="2" />
+<text  x="1157.75" y="407.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::Dataset#cache_get (1000) (6 samples, 0.25%)</title><rect x="78.1" y="285" width="2.7" height="15.0" fill="rgb(253,48,29)" rx="2" ry="2" />
+<text  x="81.11" y="295.5" ></text>
+</g>
+<g >
+<title>String#to_sym (1000) (3 samples, 0.13%)</title><rect x="1067.7" y="157" width="1.4" height="15.0" fill="rgb(210,177,20)" rx="2" ry="2" />
+<text  x="1070.67" y="167.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#synchronize (1000) (4 samples, 0.17%)</title><rect x="79.0" y="269" width="1.8" height="15.0" fill="rgb(213,158,42)" rx="2" ry="2" />
+<text  x="81.96" y="279.5" ></text>
+</g>
+<g >
+<title>Array#each (1000) (51 samples, 2.13%)</title><rect x="93.2" y="285" width="25.1" height="15.0" fill="rgb(240,90,22)" rx="2" ry="2" />
+<text  x="96.20" y="295.5" >A..</text>
+</g>
+<g >
+<title>Kernel#freeze (2000) (1 samples, 0.04%)</title><rect x="48.4" y="333" width="0.5" height="15.0" fill="rgb(238,218,14)" rx="2" ry="2" />
+<text  x="51.38" y="343.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatasetMethods#insert (1000) (2,291 samples, 95.65%)</title><rect x="26.1" y="397" width="1128.6" height="15.0" fill="rgb(217,31,41)" rx="2" ry="2" />
+<text  x="29.14" y="407.5" >Sequel::Postgres::DatasetMethods#insert (1000)</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#hold (1000) (51 samples, 2.13%)</title><rect x="247.5" y="157" width="25.0" height="15.0" fill="rgb(252,155,38)" rx="2" ry="2" />
+<text  x="250.50" y="167.5" >S..</text>
+</g>
+<g >
+<title>Sequel::Dataset#format_timestamp_usec (1000) (16 samples, 0.67%)</title><rect x="232.5" y="125" width="8.0" height="15.0" fill="rgb(227,117,46)" rx="2" ry="2" />
+<text  x="235.54" y="135.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::DatabaseMethods#primary_key (1000) (72 samples, 3.01%)</title><rect x="1119.3" y="365" width="35.4" height="15.0" fill="rgb(206,93,5)" rx="2" ry="2" />
+<text  x="1122.32" y="375.5" >Seq..</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#checkin_connection (1000) (2 samples, 0.08%)</title><rect x="1108.2" y="205" width="1.1" height="15.0" fill="rgb(206,172,37)" rx="2" ry="2" />
+<text  x="1111.22" y="215.5" ></text>
+</g>
+<g >
+<title>PG::Connection#escape_string (1000) (3 samples, 0.13%)</title><rect x="251.7" y="141" width="1.7" height="15.0" fill="rgb(245,176,48)" rx="2" ry="2" />
+<text  x="254.68" y="151.5" ></text>
+</g>
+<g >
+<title>Sequel::UnmodifiedIdentifiers::DatasetMethods#output_identifier (1000) (5 samples, 0.21%)</title><rect x="1066.5" y="173" width="2.6" height="15.0" fill="rgb(231,28,53)" rx="2" ry="2" />
+<text  x="1069.46" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#initialize_clone (1000) (12 samples, 0.50%)</title><rect x="41.0" y="333" width="6.1" height="15.0" fill="rgb(238,130,47)" rx="2" ry="2" />
+<text  x="44.00" y="343.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#_execute (1000) (1,609 samples, 67.17%)</title><rect x="296.8" y="237" width="792.5" height="15.0" fill="rgb(237,27,46)" rx="2" ry="2" />
+<text  x="299.80" y="247.5" >Sequel::Postgres::Database#_execute (1000)</text>
+</g>
+<g >
+<title>Sequel::Dataset#supports_timestamp_usecs? (1000) (1 samples, 0.04%)</title><rect x="240.5" y="125" width="0.6" height="15.0" fill="rgb(227,21,8)" rx="2" ry="2" />
+<text  x="243.55" y="135.5" ></text>
+</g>
+<g >
+<title>Kernel#respond_to? (1000) (1 samples, 0.04%)</title><rect x="1186.9" y="109" width="0.3" height="15.0" fill="rgb(244,43,38)" rx="2" ry="2" />
+<text  x="1189.90" y="119.5" ></text>
+</g>
+<g >
+<title>Hash#merge! (1000) (2 samples, 0.08%)</title><rect x="37.9" y="349" width="1.0" height="15.0" fill="rgb(205,206,41)" rx="2" ry="2" />
+<text  x="40.90" y="359.5" ></text>
+</g>
+<g >
+<title>String#to_s (1000) (1 samples, 0.04%)</title><rect x="1140.4" y="269" width="0.4" height="15.0" fill="rgb(254,185,54)" rx="2" ry="2" />
+<text  x="1143.45" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#execute (1000) (1,673 samples, 69.84%)</title><rect x="285.4" y="317" width="824.3" height="15.0" fill="rgb(251,123,2)" rx="2" ry="2" />
+<text  x="288.35" y="327.5" >Sequel::Dataset#execute (1000)</text>
+</g>
+<g >
+<title>Sequel::Postgres::Dataset#yield_hash_rows (1) (69 samples, 2.88%)</title><rect x="1156.0" y="237" width="33.8" height="15.0" fill="rgb(230,144,47)" rx="2" ry="2" />
+<text  x="1159.01" y="247.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::Dataset#literal_append (3000) (33 samples, 1.38%)</title><rect x="101.9" y="253" width="16.4" height="15.0" fill="rgb(229,121,28)" rx="2" ry="2" />
+<text  x="104.88" y="263.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (1000) (1 samples, 0.04%)</title><rect x="152.6" y="285" width="0.5" height="15.0" fill="rgb(250,112,47)" rx="2" ry="2" />
+<text  x="155.63" y="295.5" ></text>
+</g>
+<g >
+<title>Sequel::Postgres::Database#_execute (1) (71 samples, 2.96%)</title><rect x="1154.8" y="269" width="35.0" height="15.0" fill="rgb(245,110,50)" rx="2" ry="2" />
+<text  x="1157.77" y="279.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#acquire (1000) (16 samples, 0.67%)</title><rect x="1090.3" y="253" width="7.8" height="15.0" fill="rgb(254,41,1)" rx="2" ry="2" />
+<text  x="1093.33" y="263.5" ></text>
+</g>
+<g >
+<title>String#to_s (1000) (1 samples, 0.04%)</title><rect x="1141.6" y="269" width="0.3" height="15.0" fill="rgb(210,212,14)" rx="2" ry="2" />
+<text  x="1144.56" y="279.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#execute (1) (71 samples, 2.96%)</title><rect x="1154.8" y="349" width="35.1" height="15.0" fill="rgb(251,160,20)" rx="2" ry="2" />
+<text  x="1157.76" y="359.5" >Se..</text>
+</g>
+<g >
+<title>Sequel::Dataset#_check_modification_allowed! (1000) (6 samples, 0.25%)</title><rect x="65.9" y="317" width="3.2" height="15.0" fill="rgb(208,119,10)" rx="2" ry="2" />
+<text  x="68.92" y="327.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#log_connection_yield (1) (2 samples, 0.08%)</title><rect x="1154.8" y="205" width="1.2" height="15.0" fill="rgb(224,31,23)" rx="2" ry="2" />
+<text  x="1157.78" y="215.5" ></text>
+</g>
+<g >
+<title>Sequel::UnmodifiedIdentifiers::DatasetMethods#input_identifier (1000) (2 samples, 0.08%)</title><rect x="1140.8" y="285" width="1.1" height="15.0" fill="rgb(224,84,14)" rx="2" ry="2" />
+<text  x="1143.79" y="295.5" ></text>
+</g>
+<g >
+<title>&lt;Class::Time&gt;#now (1000) (2 samples, 0.08%)</title><rect x="1167.5" y="141" width="0.9" height="15.0" fill="rgb(220,214,50)" rx="2" ry="2" />
+<text  x="1170.51" y="151.5" ></text>
+</g>
+<g >
+<title>Thread::Mutex#synchronize (1000) (9 samples, 0.38%)</title><rect x="1093.7" y="205" width="4.4" height="15.0" fill="rgb(216,26,15)" rx="2" ry="2" />
+<text  x="1096.67" y="215.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#cache_set (1000) (11 samples, 0.46%)</title><rect x="1071.3" y="173" width="5.2" height="15.0" fill="rgb(218,198,27)" rx="2" ry="2" />
+<text  x="1074.30" y="183.5" ></text>
+</g>
+<g >
+<title>Sequel::SequelMethods#condition_specifier? (1000) (9 samples, 0.38%)</title><rect x="272.5" y="253" width="4.2" height="15.0" fill="rgb(247,20,54)" rx="2" ry="2" />
+<text  x="275.49" y="263.5" ></text>
+</g>
+<g >
+<title>ProductRepository#read (2) (72 samples, 3.01%)</title><rect x="1154.7" y="429" width="35.3" height="15.0" fill="rgb(222,101,41)" rx="2" ry="2" />
+<text  x="1157.72" y="439.5" >Pr..</text>
+</g>
+<g >
+<title>Kernel#is_a? (3000) (2 samples, 0.08%)</title><rect x="101.0" y="253" width="0.9" height="15.0" fill="rgb(232,80,36)" rx="2" ry="2" />
+<text  x="103.98" y="263.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#quoted_identifier_append (1000) (6 samples, 0.25%)</title><rect x="137.5" y="189" width="2.9" height="15.0" fill="rgb(230,196,19)" rx="2" ry="2" />
+<text  x="140.45" y="199.5" ></text>
+</g>
+<g >
+<title>Sequel::Database#sharded? (1000) (1 samples, 0.04%)</title><rect x="283.2" y="301" width="0.6" height="15.0" fill="rgb(253,131,52)" rx="2" ry="2" />
+<text  x="286.22" y="311.5" ></text>
+</g>
+<g >
+<title>Kernel#is_a? (1000) (1 samples, 0.04%)</title><rect x="275.8" y="237" width="0.4" height="15.0" fill="rgb(254,180,29)" rx="2" ry="2" />
+<text  x="278.82" y="247.5" ></text>
+</g>
+<g >
+<title>Sequel::Dataset#insert_sql (1000) (455 samples, 19.00%)</title><rect x="54.0" y="349" width="224.4" height="15.0" fill="rgb(220,57,2)" rx="2" ry="2" />
+<text  x="57.03" y="359.5" >Sequel::Dataset#insert_sql (1..</text>
+</g>
+<g >
+<title>Hash#merge! (1000) (1 samples, 0.04%)</title><rect x="73.8" y="317" width="0.6" height="15.0" fill="rgb(212,2,42)" rx="2" ry="2" />
+<text  x="76.77" y="327.5" ></text>
+</g>
+<g >
+<title>Integer#to_s (1000) (1 samples, 0.04%)</title><rect x="234.5" y="109" width="0.5" height="15.0" fill="rgb(223,13,3)" rx="2" ry="2" />
+<text  x="237.52" y="119.5" ></text>
+</g>
+<g >
+<title>MatchData#end (2000) (1 samples, 0.04%)</title><rect x="1175.7" y="109" width="0.3" height="15.0" fill="rgb(247,162,25)" rx="2" ry="2" />
+<text  x="1178.66" y="119.5" ></text>
+</g>
+<g >
+<title>String#to_f (1000) (1 samples, 0.04%)</title><rect x="1162.2" y="205" width="0.3" height="15.0" fill="rgb(215,43,27)" rx="2" ry="2" />
+<text  x="1165.18" y="215.5" ></text>
+</g>
+<g >
+<title>Sequel::ThreadedConnectionPool#sync (1000) (17 samples, 0.71%)</title><rect x="1101.1" y="253" width="8.6" height="15.0" fill="rgb(224,202,14)" rx="2" ry="2" />
+<text  x="1104.13" y="263.5" ></text>
+</g>
+</g>
+</svg>

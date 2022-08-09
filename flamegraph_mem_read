@@ -1,0 +1,9 @@
+Thread:1160;Fiber:1180;[global]#[no method] (1) 0.00596
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#read (1) 0.006199
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#read (1);ArrayDatabase#limit (1) 0.003099
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#read (1);ArrayDatabase#limit (1);Kernel#class (1) 0.003099
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#read (1);ArrayDatabase#limit (1);Array#first (1) 0.002861
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#read (1);ArrayDatabase#limit (1);Class#new (1) 0.004768
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#read (1);ArrayDatabase#limit (1);Class#new (1);ArrayDatabase#initialize (1) 0.002146
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#read (1);ArrayDatabase#all (1) 0.000954
+Thread:1160;Fiber:1180;[global]#[no method] (1);ProductRepository#read (1);Array#to_a (1) 0.001907
